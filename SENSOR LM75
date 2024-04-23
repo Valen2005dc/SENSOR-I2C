@@ -1,0 +1,222 @@
+#include "stm32f401xe.h"
+#include <stdio.h>
+#include <string.h>
+
+// Prototipos de funciones
+void USART2_Init(void);
+void ADC_Init(void);
+uint16_t ADC_Read(uint8_t channel);
+float ADC_to_Voltage(uint16_t adc_value);
+float Voltage_to_Temperature(float voltage);
+void I2C_Init(void);
+void OLED_Init(void);
+void OLED_Display_Temperature(float temperature);
+void OLED_Display_Message(const char* message);
+char Teclado(void);
+
+int main(void) {
+    USART2_Init(); // Inicializar USART2 para imprimir
+
+    ADC_Init(); // Inicializar ADC para leer la temperatura
+    I2C_Init(); // Inicializar I2C para la comunicación con la OLED y el sensor
+
+    // Inicializar la pantalla OLED
+    OLED_Init();
+	
+	 char tecla = '\0';
+    float temp_alerta = 35.0f; // Temperatura de alerta (ejemplo: 35°C)
+
+
+    while (1) {
+        // Leer temperatura desde el sensor LM75 (ejemplo de sensor I2C)
+        uint8_t temp_register = 0x00; // Registro de temperatura en LM75
+        uint8_t temperature_data[2];
+
+        // Enviar comando para iniciar la conversión de temperatura
+        I2C_Write(0x48, &temp_register, 1);
+
+        // Esperar un tiempo para la conversión (tiempo típico de conversión del LM75 es ~100 ms)
+        for (volatile int i = 0; i < 100000; i++) {}
+
+        // Leer los datos de temperatura
+        I2C_Write(0x48 | 0x01, temperature_data, 2);
+
+        // Calcular la temperatura en grados Celsius
+        int16_t temp_raw = (temperature_data[0] << 8) | temperature_data[1];
+        float temperature = (float)temp_raw / 256.0f;
+
+        printf("Temperatura: %.2f °C\r\n", temperature);
+        OLED_Display_Temperature(temperature); // Mostrar temperatura en la pantalla OLED
+
+				// Leer tecla presionada en el teclado matricial
+        tecla = Teclado();
+
+        // Verificar si se supera la temperatura 
+				//de alerta y mostrar la alarma en la OLED
+        if (temperature > temp_alerta && tecla != '\0') {
+            char alert_message[20];
+            sprintf(alert_message, "ALERTA - Tecla: %c", tecla);
+            OLED_Display_Message(alert_message);
+        }	
+					
+        // Pequeño retardo antes de la siguiente lecturaA
+        for (volatile int i = 0; i < 1000000; i++) {}
+    }
+
+    return 0;
+}
+
+// Inicializar USART2 para imprimir mensajes
+void USART2_Init(void) {
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN; // Habilitar reloj GPIOA
+    RCC->APB1ENR |= RCC_APB1ENR_USART2EN; // Habilitar USART2
+
+    // Configurar pines PA2 (TX) y PA3 (RX) como alternativa de función
+    GPIOA->MODER |= GPIO_MODER_MODE2_1 | GPIO_MODER_MODE3_1; // PA2: Alternate function mode, PA3: Alternate function mode
+    GPIOA->AFR[0] |= (7 << GPIO_AFRL_AFSEL2_Pos) | (7 << GPIO_AFRL_AFSEL3_Pos); // AF7 para USART2 en PA2 y PA3
+
+    USART2->BRR = 416; // Configurar baud rate (115200 @ 16MHz)
+    USART2->CR1 |= USART_CR1_UE | USART_CR1_TE; // Habilitar USART2 y TX
+}
+
+// Inicializar ADC para la lectura del sensor de temperatura
+void ADC_Init(void) {
+    RCC->APB2ENR |= RCC_APB2ENR_ADC1EN; // Habilitar reloj ADC1
+
+    ADC1->CR2 |= ADC_CR2_ADON; // Habilitar ADC
+    ADC1->SMPR2 |= ADC_SMPR2_SMP0; // Seleccionar tiempo de muestreo para el canal 0 (PA0)
+}
+
+// Leer valor ADC de un canal específico
+uint16_t ADC_Read(uint8_t channel) {
+    ADC1->SQR3 = channel; // Seleccionar canal de conversión
+    ADC1->CR2 |= ADC_CR2_SWSTART; // Iniciar conversión
+
+    while (!(ADC1->SR & ADC_SR_EOC)) {} // Esperar hasta que la conversión esté completa
+
+    return ADC1->DR; // Retornar resultado de la conversión
+}
+
+// Convertir valor ADC a voltaje (en voltios)
+float ADC_to_Voltage(uint16_t adc_value) {
+    return (3.3f * adc_value) / 4095.0f; // Vref = 3.3V, Resolución ADC = 12 bits (4096 niveles)
+}
+
+// Convertir voltaje a temperatura 
+float Voltage_to_Temperature(float voltage) {
+   
+    return (voltage - 0.5f) * 100.0f; 
+}
+
+// Inicializar I2C para la comunicación con la OLED y el sensor
+void I2C_Init(void) {
+    RCC->APB1ENR |= RCC_APB1ENR_I2C1EN; // Habilitar reloj I2C1
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOBEN; // Habilitar reloj GPIOB
+
+    GPIOB->MODER |= (2 << (6 * 2)) | (2 << (7 * 2)); // PB6 y PB7 en modo alternativo
+    GPIOB->AFR[0] |= (4 << (6 * 4)) | (4 << (7 * 4)); // AF4 para I2C1 en PB6 y PB7
+
+    I2C1->CR1 &= ~I2C_CR1_PE; // Deshabilitar I2C1 para configuración
+    I2C1->CR2 = 42; // Frecuencia del reloj del APB1 (42 MHz)
+    I2C1->CCR = 210; // Frecuencia de reloj en modo estándar (100 kHz)
+    I2C1->TRISE = 43; // Tiempo de subida para el modo estándar
+    I2C1->CR1 |= I2C_CR1_PE; // Habilitar I2C1
+}
+
+// Inicializar la pantalla OLED SSD1306
+void OLED_Init(void) {
+    
+    // Envío de comandos de inicialización 
+		//a través de I2C
+
+    uint8_t init_cmds[] = {
+        0xAE,                                        // Display OFF
+        0xD5, 0x80,                                  // Set display clock divide ratio/oscillator frequency
+        0xA8, 0x3F,                                  // Set multiplex ratio (1 to 64)
+        0xD3, 0x00,                                  // Set display offset
+        0x40,                                        // Set display start line
+        0x8D, 0x14,                                  // Charge pump setting (0x14 enable, 0x10 disable)
+                                                                // Más comandos de inicialización...
+
+    };
+
+    I2C_Write(0x3C, init_cmds, sizeof(init_cmds));                                         // Dirección I2C de la pantalla OLED (0x3C)
+}
+
+// Mostrar temperatura en la pantalla OLED
+void OLED_Display_Temperature(float temperature) {
+    char buffer[20];
+    sprintf(buffer, "Temp: %.2f C", temperature);
+ // Envío de datos a la pantalla OLED a través de I2C
+    uint8_t display_data[20];
+    display_data[0] = 0x40;
+	// Comando de datos para la pantalla OLED
+                                                                    // Copiar el contenido del buffer al array de datos para enviar a la pantalla OLED
+    memcpy(&display_data[1], buffer, strlen(buffer));
+
+    I2C_Write(0x3C, display_data, strlen(buffer) + 1);              // Dirección I2C de la pantalla OLED (0x3C)
+}
+
+// Función para escribir datos a través de I2C
+
+void I2C_Write(uint8_t address, uint8_t* data, uint8_t length) {
+    I2C1->CR1 |= I2C_CR1_START;                                            // Generar condición de inicio (START)
+
+    while (!(I2C1->SR1 & I2C_SR1_SB)) {}                                   // Esperar a que se envíe la condición de inicio
+
+    (void) I2C1->SR1; // Limpiar la bandera SB
+    I2C1->DR = (address << 1) & 0xFE;                                    // Enviar dirección de escritura (bit 0 = 0)
+
+    while (!(I2C1->SR1 & I2C_SR1_ADDR)) {}                               // Esperar a que se envíe la dirección
+
+    (void) I2C1->SR1; // Limpiar la bandera ADDR
+    (void) I2C1->SR2; // Limpiar la bandera ADDR
+
+    for (uint8_t i = 0; i < length; i++) {
+        I2C1->DR = data[i]; // Enviar datos
+        while (!(I2C1->SR1 & I2C_SR1_BTF)) {}                                S // Esperar a que se complete la transferencia
+    }
+
+    I2C1->CR1 |= I2C_CR1_STOP; // Generar condición de parada (STOP)
+}
+char Teclado(void) {
+    int cl = 0;
+    char paso[] = {'1', '2', '3', 'A',
+                   '4', '5', '6', 'B',
+                   '7', '8', '9', 'C',
+                   '*', '0', '#', 'D'};
+
+    while (1) {
+        for (int i = 0; i < 100000; i++) {}
+
+        GPIOB->ODR = 128;
+        cl = (GPIOB->IDR) & 0x0F;
+        if (cl == 1) { return paso[0]; }
+        else if (cl == 2) { return paso[1]; }
+        else if (cl == 4) { return paso[2]; }
+        else if (cl == 8) { return paso[3]; }
+
+        GPIOB->ODR = 64;
+        cl = (GPIOB->IDR) & 0x0F;
+        if (cl == 1) { return paso[4]; }
+        else if (cl == 2) { return paso[5]; }
+        else if (cl == 4) { return paso[6]; }
+        else if (cl == 8) { return paso[7]; }
+
+        GPIOB->ODR = 32;
+        cl = (GPIOB->IDR) & 0x0F;
+        if (cl == 1) { return paso[8]; }
+        else if (cl == 2) { return paso[9]; }
+        else if (cl == 4) { return paso[10]; }
+        else if (cl == 8) { return paso[11]; }
+
+        GPIOB->ODR = 16;
+        cl = (GPIOB->IDR) & 0x0F;
+        if (cl == 1) { return paso[12]; }
+        else if (cl == 2) { return paso[13]; }
+        else if (cl == 4) { return paso[14]; }
+        else if (cl == 8) { return paso[15]; }
+}
+
+
+
